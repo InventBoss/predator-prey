@@ -1,0 +1,12 @@
+window_width = 1000.0
+window_height = 600.0
+predator_population = 10
+prey_population = 100000
+predator_speed = 0.5
+prey_speed = 0.5
+predator_life = 30000
+prey_life = 50000
+detection_range = 60.0
+default_dimensions = 0.5
+environment_grow_rate = 1.11
+environment_max = 1000000
