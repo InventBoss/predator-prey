@@ -1,12 +1,19 @@
-window_width = 1000.0
-window_height = 600.0
-predator_population = 10
-prey_population = 100000
-predator_speed = 0.5
-prey_speed = 0.5
-predator_life = 30000
-prey_life = 50000
-detection_range = 60.0
-default_dimensions = 0.5
-environment_grow_rate = 1.11
+window_width = 1200.0
+window_height = 700.0
+
+predator_population = 150
+prey_population = 250
+
+predator_speed = 0.1
+prey_speed = 0.2
+
+predator_life = 50
+prey_life = 50
+
+prey_reproduction_energy = 100
+predator_reproduction_energy = 100
+
+detection_range = 50.0
+default_dimensions = 3
+environment_grow_rate = 1.1
 environment_max = 1000000

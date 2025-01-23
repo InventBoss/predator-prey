@@ -35,10 +35,15 @@ struct Mortal {
 }
 
 #[derive(Component)]
-struct Prey;
+struct Prey {
+    hunted: bool,
+    try_mating: bool,
+}
 
 #[derive(Component)]
-struct Predator;
+struct Predator {
+    hunting: bool,
+}
 
 #[derive(Component)]
 struct Life {
@@ -51,11 +56,11 @@ struct Environment {
 }
 
 fn update_predators(
-    mut predators: Query<&mut PositionSize, (With<Predator>, Without<Prey>)>,
+    mut predators: Query<(&mut PositionSize, &mut Predator), (With<Predator>, Without<Prey>)>,
     preys: Query<&PositionSize, (With<Prey>, Without<Predator>)>,
     settings: Res<Settings>,
 ) {
-    for mut predator_position_size in predators.iter_mut() {
+    for (mut predator_position_size, mut predator) in predators.iter_mut() {
         // Store the closest position of a prey
         let mut closest_prey_position: Option<&PositionSize> = None;
 
@@ -73,6 +78,10 @@ fn update_predators(
             if detected && distance < closest_prey_distance {
                 closest_prey_position = Some(prey_position_size);
                 closest_prey_distance = distance;
+
+                predator.hunting = true;
+            } else {
+                predator.hunting = false;
             }
         }
 
@@ -89,12 +98,16 @@ fn update_predators(
 }
 
 fn update_preys(
-    mut preys: Query<(&mut PositionSize, &mut Life), (With<Prey>, Without<Predator>)>,
+    mut preys: Query<(&mut PositionSize, &mut Life, &mut Prey), (With<Prey>, Without<Predator>)>,
     predators: Query<&PositionSize, (With<Predator>, Without<Prey>)>,
     mut environment_query: Query<&mut Environment>,
     settings: Res<Settings>,
 ) {
-    for (mut prey_position_size, mut life) in preys.iter_mut() {
+    // if let Some((prey_position_size, life, prey)) = preys.iter().next() {
+    //     println!("Position: {}, {}, Life: {}, Hunted: {}, Mating: {}", prey_position_size.x, prey_position_size.y, life.value, prey.hunted, prey.try_mating);
+    // }
+
+    for (mut prey_position_size, mut life, mut prey) in preys.iter_mut() {
         // Store the closest position of a predator
         let mut closest_predator_position: Option<&PositionSize> = None;
 
@@ -123,13 +136,17 @@ fn update_preys(
                 closest_predator,
                 settings.prey_speed,
             );
+
+            prey.hunted = true;
+        } else {
+            prey.hunted = false;
         }
 
         // Prey "eats" the environment to regain life
         for mut environment in environment_query.iter_mut() {
-            if environment.energy_pool > 0 {
+            if environment.energy_pool > 0 && !prey.hunted {
                 environment.energy_pool -= 1;
-                life.value += 10;
+                life.value += 1;
             }
         }
     }
@@ -144,17 +161,18 @@ fn update_environment(mut query: Query<&mut Environment>, settings: Res<Settings
 }
 
 fn drain_life(
+    // This query makes it so that we fetch either a predator or a prey if the option is there
     mut query: Query<
         (&mut Mortal, &mut Life, Option<&Predator>, Option<&Prey>),
         Or<(With<Predator>, With<Prey>)>,
     >,
 ) {
     for (mut mortal, mut life, predator, prey) in query.iter_mut() {
-        if predator.is_some() {
-            life.value -= 2
+        if predator.is_some() && predator.unwrap().hunting {
+            life.value -= 1;
         }
-        if prey.is_some() {
-            life.value -= 1
+        if prey.is_some() && prey.unwrap().hunted {
+            life.value -= 1;
         }
 
         if life.value <= 0 {
@@ -185,10 +203,14 @@ fn handle_collisions(
     }
 }
 
-fn update_transform(mut query: Query<(&PositionSize, &mut Transform)>) {
-    for (position_size, mut transform) in query.iter_mut() {
+fn update_transform(mut query: Query<(&PositionSize, &mut Transform, &mut Sprite)>) {
+    for (position_size, mut transform, mut sprite) in query.iter_mut() {
+        // Make sure the transform components line up with their entities position
         transform.translation.x = position_size.x;
         transform.translation.y = position_size.y;
+
+        // Shouldn't be used regularly, but if the size of PositionSize changes, it will be updated in the sprite
+        sprite.custom_size = Some(Vec2::new(position_size.width, position_size.height));
     }
 }
 
@@ -222,7 +244,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
     let text_font: Handle<Font> = asset_server.load("fonts/SpaceMono-Regular.ttf");
 
     commands.spawn((
-        Text::new("From an &str into a Text with the default font!"),
+        Text::new(""),
         TextFont {
             // This font is loaded and will be used instead of the default font.
             font: text_font.clone(),
@@ -250,7 +272,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             .gen_range((-(window_height / 2.0).abs())..(window_height / 2.0).abs());
 
         commands.spawn((
-            Predator,
+            Predator { hunting: false },
             Mortal { dead: false },
             Life {
                 value: settings.predator_life,
@@ -278,7 +300,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             .gen_range((-(window_height / 2.0).abs())..(window_height / 2.0).abs());
 
         commands.spawn((
-            Prey,
+            Prey {
+                hunted: false,
+                try_mating: false,
+            },
             Mortal { dead: false },
             Life {
                 value: settings.prey_life,
