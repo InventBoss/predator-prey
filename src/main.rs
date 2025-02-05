@@ -3,9 +3,15 @@ use bevy::{
     prelude::*,
     window::Window,
 };
+use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use config::Config;
+use egui::Color32;
 use rand::Rng;
 use std::collections::HashMap;
+
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use egui_plot::{Legend, Line, Plot, PlotPoints};
 
 mod position_systems;
 use position_systems::{
@@ -13,7 +19,15 @@ use position_systems::{
     PositionSize,
 };
 
-#[derive(Resource)]
+#[derive(Reflect, Resource, Default)]
+#[reflect(Resource)]
+struct PopulationHistory {
+    prey_population: Vec<[f64; 2]>,
+    predator_population: Vec<[f64; 2]>,
+}
+
+#[derive(Reflect, Resource, Default)]
+#[reflect(Resource)]
 struct Settings {
     window_width: f32,
     window_height: f32,
@@ -29,28 +43,33 @@ struct Settings {
     environment_max: i32,
 }
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
 struct Mortal {
     dead: bool,
 }
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
 struct Prey {
     hunted: bool,
     try_mating: bool,
 }
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
 struct Predator {
     hunting: bool,
 }
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
 struct Life {
     value: i32,
 }
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
 struct Environment {
     energy_pool: i32,
 }
@@ -210,7 +229,10 @@ fn update_transform(mut query: Query<(&PositionSize, &mut Transform, &mut Sprite
         transform.translation.y = position_size.y;
 
         // Shouldn't be used regularly, but if the size of PositionSize changes, it will be updated in the sprite
-        sprite.custom_size = Some(Vec2::new(position_size.width, position_size.height));
+        sprite.custom_size = Some(Vec2::new(
+            position_size.width.abs(),
+            position_size.height.abs(),
+        ));
     }
 }
 
@@ -352,6 +374,44 @@ fn read_settings(mut commands: Commands) {
     println!("{:#?}", settings["window_width"]);
 }
 
+fn update_population_history(
+    time: Res<Time>,
+    prey_query: Query<&Prey>,
+    predator_query: Query<&Predator>,
+    mut history: ResMut<PopulationHistory>,
+) {
+    let prey_count = prey_query.iter().count() as f64;
+    let predator_count = predator_query.iter().count() as f64;
+
+    let time_elapsed = time.elapsed_secs_f64();
+
+    history.prey_population.push([time_elapsed, prey_count]);
+    history
+        .predator_population
+        .push([time_elapsed, predator_count]);
+}
+
+fn plot_ui(mut contexts: EguiContexts, history: Res<PopulationHistory>) {
+    egui::Window::new("Populations & Environment Energy Over Time").show(
+        contexts.ctx_mut(),
+        |ui| {
+            let prey_line = Line::new(PlotPoints::from(history.prey_population.clone()))
+                .name("Prey Population")
+                .color(Color32::BLUE);
+            let predator_line = Line::new(PlotPoints::from(history.predator_population.clone()))
+                .name("Predator Population")
+                .color(Color32::RED);
+
+            Plot::new("entity_population_plot")
+                .legend(Legend::default())
+                .show(ui, |plot_ui| {
+                    plot_ui.line(prey_line);
+                    plot_ui.line(predator_line);
+                });
+        },
+    );
+}
+
 fn main() {
     let mut app = App::new();
 
@@ -378,9 +438,30 @@ fn main() {
             ..default()
         }),
         FrameTimeDiagnosticsPlugin,
+        EguiPlugin,
+        WorldInspectorPlugin::new(),
     ));
 
+    // Make sure settings resource is created BEFORE
+    // setting up the simulation with all the necessary values
     app.add_systems(Startup, (read_settings, setup.after(read_settings)));
+    app.insert_resource(PopulationHistory {
+        prey_population: Vec::new(),
+        predator_population: Vec::new(),
+    });
+
+    // These components and resources are being "registered" to appear in the inspector gui
+    app.register_type::<PopulationHistory>();
+    app.register_type::<Settings>();
+    app.register_type::<PositionSize>();
+    app.register_type::<Mortal>();
+    app.register_type::<Prey>();
+    app.register_type::<Predator>();
+    app.register_type::<Life>();
+    app.register_type::<Environment>();
+
+    app.add_plugins(ResourceInspectorPlugin::<Settings>::default());
+
     app.add_systems(
         Update,
         (
@@ -394,6 +475,8 @@ fn main() {
             remove_dead,
             drain_life,
             update_ui_text,
+            update_population_history,
+            plot_ui,
         ),
     );
 

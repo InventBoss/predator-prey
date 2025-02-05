@@ -12,7 +12,9 @@
 use bevy::prelude::*;
 use rand::Rng;
 
-#[derive(Component)]
+#[derive(Reflect, Default, Component)]
+#[reflect(Component)]
+
 pub struct PositionSize {
     pub x: f32,
     pub y: f32,
