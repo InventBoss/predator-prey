@@ -1,14 +1,17 @@
 window_width = 1200.0
 window_height = 700.0
 
-predator_population = 150
-prey_population = 250
+predator_population = 5
+prey_population = 1000
 
-predator_speed = 0.1
-prey_speed = 0.2
+predator_speed = 0.2
+prey_speed = 0.1
 
-predator_life = 50
-prey_life = 50
+predator_life = 5000
+prey_life = 5000
+
+prey_idle_energy_gain = 2
+predator_hunt_energy_gain = 1000
 
 prey_reproduction_energy = 100
 predator_reproduction_energy = 100

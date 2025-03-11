@@ -15,18 +15,18 @@ use egui_plot::{Legend, Line, Plot, PlotPoints};
 
 mod position_systems;
 use position_systems::{
-    avoid, in_detection_range, is_colliding, move_towards, wiggle_squares, window_collision,
-    PositionSize,
+    avoid, in_detection_range, is_colliding, move_towards, update_transform, wiggle_squares,
+    window_collision, PositionSize,
 };
 
-#[derive(Reflect, Resource, Default)]
+#[derive(Reflect, Resource)]
 #[reflect(Resource)]
 struct PopulationHistory {
     prey_population: Vec<[f64; 2]>,
     predator_population: Vec<[f64; 2]>,
 }
 
-#[derive(Reflect, Resource, Default)]
+#[derive(Reflect, Resource)]
 #[reflect(Resource)]
 struct Settings {
     window_width: f32,
@@ -37,41 +37,76 @@ struct Settings {
     prey_speed: f32,
     predator_life: i32,
     prey_life: i32,
+    prey_idle_energy_gain: i32,
+    predator_hunt_energy_gain: i32,
+    prey_reproduction_energy: i32,
+    predator_reproduction_energy: i32,
     detection_range: f32,
     default_dimensions: f32,
     environment_grow_rate: f32,
     environment_max: i32,
 }
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Mortal {
     dead: bool,
 }
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Prey {
     hunted: bool,
     try_mating: bool,
+    status: u16, // 0 is idle, 1 is mating, 2 is avoiding
 }
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Predator {
     hunting: bool,
+    status: u16, // 0 is idle, 1 is mating, 2 is hunting
 }
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect)]
+enum PreyBehavior {
+    Idle,
+    Mating,
+    Avoiding,
+}
+
+#[derive(Reflect)]
+enum PredatorBehavior {
+    Idle,
+    Mating,
+    Hunting,
+}
+
+#[derive(Reflect)]
+enum Behaviors {
+    PredatorBehavior,
+    PreyBehavior,
+}
+
+#[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Life {
     value: i32,
 }
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Environment {
     energy_pool: i32,
+}
+
+fn can_mate(current_energy: i32, required_energy: i32, status: u16) -> bool {
+    // Check to make sure the predator or prey isn't hunting or being hunted
+    if status == 2 {
+        return false;
+    }
+
+    return current_energy >= required_energy;
 }
 
 fn update_predators(
@@ -90,7 +125,7 @@ fn update_predators(
         for prey_position_size in preys.iter() {
             let (detected, distance) = in_detection_range(
                 &predator_position_size,
-                &prey_position_size,
+                prey_position_size,
                 settings.detection_range,
             );
 
@@ -98,9 +133,9 @@ fn update_predators(
                 closest_prey_position = Some(prey_position_size);
                 closest_prey_distance = distance;
 
-                predator.hunting = true;
+                predator.status = 2;
             } else {
-                predator.hunting = false;
+                predator.status = 0;
             }
         }
 
@@ -137,7 +172,7 @@ fn update_preys(
         for predator_position_size in predators.iter() {
             let (detected, distance) = in_detection_range(
                 &prey_position_size,
-                &predator_position_size,
+                predator_position_size,
                 settings.detection_range,
             );
 
@@ -156,14 +191,15 @@ fn update_preys(
                 settings.prey_speed,
             );
 
-            prey.hunted = true;
+            prey.status = 3;
         } else {
-            prey.hunted = false;
+            if can_mate(life.value, settings.prey_reproduction_energy, prey.status) {}
         }
 
         // Prey "eats" the environment to regain life
         for mut environment in environment_query.iter_mut() {
-            if environment.energy_pool > 0 && !prey.hunted {
+            // Checks to make sure energy can be taken from the environment and that we aren't being chased
+            if environment.energy_pool > 0 && prey.status != 3 {
                 environment.energy_pool -= 1;
                 life.value += 1;
             }
@@ -212,27 +248,13 @@ fn handle_collisions(
     mut prey_query: Query<(&PositionSize, &mut Mortal), With<Prey>>,
     mut predator_query: Query<(&PositionSize, &mut Life), With<Predator>>,
 ) {
-    for (prey_posision_size, mut mortal) in prey_query.iter_mut() {
-        for (predator_position_size, mut life) in predator_query.iter_mut() {
-            if is_colliding(prey_posision_size, predator_position_size) {
-                mortal.dead = true;
-                life.value += 500;
+    for (prey_posision_size, mut prey_mortal) in prey_query.iter_mut() {
+        for (predator_position_size, mut predator_life) in predator_query.iter_mut() {
+            if is_colliding(prey_posision_size, predator_position_size) && !prey_mortal.dead {
+                prey_mortal.dead = true;
+                predator_life.value += 500;
             }
         }
-    }
-}
-
-fn update_transform(mut query: Query<(&PositionSize, &mut Transform, &mut Sprite)>) {
-    for (position_size, mut transform, mut sprite) in query.iter_mut() {
-        // Make sure the transform components line up with their entities position
-        transform.translation.x = position_size.x;
-        transform.translation.y = position_size.y;
-
-        // Shouldn't be used regularly, but if the size of PositionSize changes, it will be updated in the sprite
-        sprite.custom_size = Some(Vec2::new(
-            position_size.width.abs(),
-            position_size.height.abs(),
-        ));
     }
 }
 
@@ -255,6 +277,59 @@ fn update_ui_text(
     }
 }
 
+fn update_population_history(
+    time: Res<Time>,
+    prey_query: Query<&Prey>,
+    predator_query: Query<&Predator>,
+    mut history: ResMut<PopulationHistory>,
+) {
+    let prey_count = prey_query.iter().count() as f64;
+    let predator_count = predator_query.iter().count() as f64;
+
+    let time_elapsed = time.elapsed_secs_f64();
+
+    history.prey_population.push([time_elapsed, prey_count]);
+    history
+        .predator_population
+        .push([time_elapsed, predator_count]);
+}
+
+fn plot_ui(mut contexts: EguiContexts, history: Res<PopulationHistory>) {
+    egui::Window::new("Populations & Environment Energy Over Time")
+        .default_open(false)
+        .show(contexts.ctx_mut(), |ui| {
+            let prey_line = Line::new(PlotPoints::from(history.prey_population.clone()))
+                .name("Prey Population")
+                .color(Color32::GREEN);
+            let predator_line = Line::new(PlotPoints::from(history.predator_population.clone()))
+                .name("Predator Population")
+                .color(Color32::RED);
+
+            Plot::new("entity_population_plot")
+                .legend(Legend::default())
+                .x_axis_label("Time (s)")
+                .y_axis_label("Amount")
+                .label_formatter(|name, value| {
+                    let display_name = &name.replace(" Population", "");
+                    if !display_name.is_empty() {
+                        format!(
+                            "{} Amount: {}\nTime: {}:{:04.1}s",
+                            display_name,
+                            value.y,
+                            (value.x / 60.0).floor(),
+                            value.x % 60.0
+                        )
+                    } else {
+                        "".to_owned()
+                    }
+                })
+                .show(ui, |plot_ui| {
+                    plot_ui.line(prey_line);
+                    plot_ui.line(predator_line);
+                });
+        });
+}
+
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<Settings>) {
     commands.spawn(Camera2d::default());
 
@@ -273,10 +348,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             font_size: 15.0,
             ..default()
         },
+        TextLayout::new_with_justify(JustifyText::Right),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(5.0),
-            left: Val::Px(15.0),
+            bottom: Val::Px(10.0),
+            right: Val::Px(10.0),
             ..default()
         },
     ));
@@ -294,7 +370,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             .gen_range((-(window_height / 2.0).abs())..(window_height / 2.0).abs());
 
         commands.spawn((
-            Predator { hunting: false },
+            Predator {
+                hunting: false,
+                status: 0,
+            },
             Mortal { dead: false },
             Life {
                 value: settings.predator_life,
@@ -325,6 +404,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             Prey {
                 hunted: false,
                 try_mating: false,
+                status: 0,
             },
             Mortal { dead: false },
             Life {
@@ -348,8 +428,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
 
 fn read_settings(mut commands: Commands) {
     let settings = Config::builder()
-        .add_source(config::File::with_name("Settings.toml"))
-        .add_source(config::Environment::with_prefix("APP"))
+        .add_source(config::File::with_name("Settings.toml")) // Read config values from file
+        .add_source(config::Environment::with_prefix("APP")) // Also read config values from environment variables
         .build()
         .unwrap()
         .try_deserialize::<HashMap<String, String>>()
@@ -365,51 +445,19 @@ fn read_settings(mut commands: Commands) {
         prey_speed: settings["prey_speed"].parse::<f32>().unwrap(),
         predator_life: settings["predator_life"].parse::<i32>().unwrap(),
         prey_life: settings["prey_life"].parse::<i32>().unwrap(),
+        prey_idle_energy_gain: settings["prey_idle_energy_gain"].parse::<i32>().unwrap(),
+        predator_hunt_energy_gain: settings["predator_hunt_energy_gain"]
+            .parse::<i32>()
+            .unwrap(),
+        prey_reproduction_energy: settings["prey_reproduction_energy"].parse::<i32>().unwrap(),
+        predator_reproduction_energy: settings["predator_reproduction_energy"]
+            .parse::<i32>()
+            .unwrap(),
         detection_range: settings["detection_range"].parse::<f32>().unwrap(),
         default_dimensions: settings["default_dimensions"].parse::<f32>().unwrap(),
         environment_grow_rate: settings["environment_grow_rate"].parse::<f32>().unwrap(),
         environment_max: settings["environment_max"].parse::<i32>().unwrap(),
     });
-
-    println!("{:#?}", settings["window_width"]);
-}
-
-fn update_population_history(
-    time: Res<Time>,
-    prey_query: Query<&Prey>,
-    predator_query: Query<&Predator>,
-    mut history: ResMut<PopulationHistory>,
-) {
-    let prey_count = prey_query.iter().count() as f64;
-    let predator_count = predator_query.iter().count() as f64;
-
-    let time_elapsed = time.elapsed_secs_f64();
-
-    history.prey_population.push([time_elapsed, prey_count]);
-    history
-        .predator_population
-        .push([time_elapsed, predator_count]);
-}
-
-fn plot_ui(mut contexts: EguiContexts, history: Res<PopulationHistory>) {
-    egui::Window::new("Populations & Environment Energy Over Time").show(
-        contexts.ctx_mut(),
-        |ui| {
-            let prey_line = Line::new(PlotPoints::from(history.prey_population.clone()))
-                .name("Prey Population")
-                .color(Color32::BLUE);
-            let predator_line = Line::new(PlotPoints::from(history.predator_population.clone()))
-                .name("Predator Population")
-                .color(Color32::RED);
-
-            Plot::new("entity_population_plot")
-                .legend(Legend::default())
-                .show(ui, |plot_ui| {
-                    plot_ui.line(prey_line);
-                    plot_ui.line(predator_line);
-                });
-        },
-    );
 }
 
 fn main() {
@@ -439,7 +487,6 @@ fn main() {
         }),
         FrameTimeDiagnosticsPlugin,
         EguiPlugin,
-        WorldInspectorPlugin::new(),
     ));
 
     // Make sure settings resource is created BEFORE
@@ -460,7 +507,12 @@ fn main() {
     app.register_type::<Life>();
     app.register_type::<Environment>();
 
-    app.add_plugins(ResourceInspectorPlugin::<Settings>::default());
+    // These are all the functions to add the ui elements to the simulation
+    app.add_plugins((
+        ResourceInspectorPlugin::<Settings>::default(),
+        WorldInspectorPlugin::new(),
+    ));
+    // app.add_systems(Update, plot_ui);
 
     app.add_systems(
         Update,

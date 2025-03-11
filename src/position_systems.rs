@@ -1,10 +1,10 @@
 /*
     This file includes all systems & child functions used for
     anything involving moving the important entities (predators & prey) around on the screen.
-    
+
     Examples:
     - Functions that draw the entity squares at said position
-    - Functions that get predators or prey to move based on random behavior, 
+    - Functions that get predators or prey to move based on random behavior,
       hunting/defending, etc.
     - Functions that restrict entity movement to the bounds of the window
 */
@@ -12,9 +12,8 @@
 use bevy::prelude::*;
 use rand::Rng;
 
-#[derive(Reflect, Default, Component)]
+#[derive(Reflect, Component)]
 #[reflect(Component)]
-
 pub struct PositionSize {
     pub x: f32,
     pub y: f32,
@@ -87,5 +86,19 @@ pub fn window_collision(mut query: Query<&mut PositionSize>, windows: Query<&Win
 
         position_size.y = position_size.y.min(window_height / 2.0);
         position_size.y = position_size.y.max(window_height / -2.0);
+    }
+}
+
+pub fn update_transform(mut query: Query<(&PositionSize, &mut Transform, &mut Sprite)>) {
+    for (position_size, mut transform, mut sprite) in query.iter_mut() {
+        // Make sure the transform components line up with their entities position
+        transform.translation.x = position_size.x;
+        transform.translation.y = position_size.y;
+
+        // Shouldn't be used regularly, but if the size of PositionSize changes, it will be updated in the sprite
+        sprite.custom_size = Some(Vec2::new(
+            position_size.width.abs(),
+            position_size.height.abs(),
+        ));
     }
 }
