@@ -41,7 +41,8 @@ struct Settings {
     predator_hunt_energy_gain: i32,
     prey_reproduction_energy: i32,
     predator_reproduction_energy: i32,
-    detection_range: f32,
+    prey_detection_range: f32,
+    predator_detection_range: f32,
     default_dimensions: f32,
     environment_grow_rate: f32,
     environment_max: i32,
@@ -56,36 +57,19 @@ struct Mortal {
 #[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Prey {
-    hunted: bool,
-    try_mating: bool,
     status: u16, // 0 is idle, 1 is mating, 2 is avoiding
 }
 
 #[derive(Reflect, Component)]
 #[reflect(Component)]
 struct Predator {
-    hunting: bool,
     status: u16, // 0 is idle, 1 is mating, 2 is hunting
 }
 
-#[derive(Reflect)]
-enum PreyBehavior {
-    Idle,
-    Mating,
-    Avoiding,
-}
-
-#[derive(Reflect)]
-enum PredatorBehavior {
-    Idle,
-    Mating,
-    Hunting,
-}
-
-#[derive(Reflect)]
-enum Behaviors {
-    PredatorBehavior,
-    PreyBehavior,
+#[derive(Reflect, Component)]
+#[reflect(Component)]
+struct MatingTarget {
+    entity: Option<PositionSize>,
 }
 
 #[derive(Reflect, Component)]
@@ -110,11 +94,14 @@ fn can_mate(current_energy: i32, required_energy: i32, status: u16) -> bool {
 }
 
 fn update_predators(
-    mut predators: Query<(&mut PositionSize, &mut Predator), (With<Predator>, Without<Prey>)>,
+    mut predators: Query<
+        (&mut PositionSize, &MatingTarget, &mut Predator),
+        (With<Predator>, Without<Prey>),
+    >,
     preys: Query<&PositionSize, (With<Prey>, Without<Predator>)>,
     settings: Res<Settings>,
 ) {
-    for (mut predator_position_size, mut predator) in predators.iter_mut() {
+    for (mut predator_position_size, mating_target, mut predator) in predators.iter_mut() {
         // Store the closest position of a prey
         let mut closest_prey_position: Option<&PositionSize> = None;
 
@@ -126,42 +113,50 @@ fn update_predators(
             let (detected, distance) = in_detection_range(
                 &predator_position_size,
                 prey_position_size,
-                settings.detection_range,
+                settings.predator_detection_range,
             );
 
             if detected && distance < closest_prey_distance {
                 closest_prey_position = Some(prey_position_size);
                 closest_prey_distance = distance;
-
-                predator.status = 2;
-            } else {
-                predator.status = 0;
             }
         }
 
-        // This code checks to see if there is a closest prey position
-        // and assigns closest prey the value to pass to the move_towards function
-        if let Some(closest_prey) = closest_prey_position {
-            move_towards(
-                &mut predator_position_size,
-                closest_prey,
-                settings.predator_speed,
-            );
+        if mating_target.entity.is_some() {
+            predator.status = 1; // Mating
+        } else if closest_prey_position.is_some() {
+            predator.status = 2; // Hunting
+        } else {
+            predator.status = 0; // Idle
+        }
+
+        // Check to see if we can mate, then move towards the target
+        if predator.status == 1 {
+            if let Some(target) = &mating_target.entity {
+                move_towards(&mut predator_position_size, target, settings.predator_speed);
+            }
+        } else if predator.status == 2 {
+            if let Some(closest_prey) = closest_prey_position {
+                move_towards(
+                    &mut predator_position_size,
+                    closest_prey,
+                    settings.predator_speed,
+                );
+            }
         }
     }
 }
 
 fn update_preys(
-    mut preys: Query<(&mut PositionSize, &mut Life, &mut Prey), (With<Prey>, Without<Predator>)>,
-    predators: Query<&PositionSize, (With<Predator>, Without<Prey>)>,
+    mut prey_query: Query<
+        (&mut PositionSize, &mut Life, &MatingTarget, &mut Prey),
+        (With<Prey>, Without<Predator>),
+    >,
+    predator_query: Query<&PositionSize, (With<Predator>, Without<Prey>)>,
     mut environment_query: Query<&mut Environment>,
     settings: Res<Settings>,
 ) {
-    // if let Some((prey_position_size, life, prey)) = preys.iter().next() {
-    //     println!("Position: {}, {}, Life: {}, Hunted: {}, Mating: {}", prey_position_size.x, prey_position_size.y, life.value, prey.hunted, prey.try_mating);
-    // }
-
-    for (mut prey_position_size, mut life, mut prey) in preys.iter_mut() {
+    for (mut prey_position_size, mut life, mating_target, mut prey) in prey_query.iter_mut() {
         // Store the closest position of a predator
         let mut closest_predator_position: Option<&PositionSize> = None;
 
@@ -169,11 +164,11 @@ fn update_preys(
         // the closest predator as we'll narrow down from there
         let mut closest_predator_distance: f32 = f32::MAX;
 
-        for predator_position_size in predators.iter() {
+        for predator_position_size in predator_query.iter() {
             let (detected, distance) = in_detection_range(
                 &prey_position_size,
                 predator_position_size,
-                settings.detection_range,
+                settings.prey_detection_range,
             );
 
             if detected && distance < closest_predator_distance {
@@ -182,18 +177,29 @@ fn update_preys(
             }
         }
 
+        if closest_predator_position.is_some() {
+            prey.status = 2 // Running
+        } else if can_mate(life.value, settings.prey_reproduction_energy, prey.status) {
+            prey.status = 1 // Mating
+        } else {
+            prey.status = 0 // Idle
+        }
+
         // This code checks to see if there is a closest predator position
         // and assigns closest predator the value to pass to the avoid function
-        if let Some(closest_predator) = closest_predator_position {
-            avoid(
-                &mut prey_position_size,
-                closest_predator,
-                settings.prey_speed,
-            );
-
-            prey.status = 3;
-        } else {
-            if can_mate(life.value, settings.prey_reproduction_energy, prey.status) {}
+        if prey.status == 2 {
+            if let Some(closest_predator) = closest_predator_position {
+                avoid(
+                    &mut prey_position_size,
+                    closest_predator,
+                    settings.prey_speed,
+                );
+            }
+        // Check to see we can mate and there is an available mate
+        } else if prey.status == 1 && mating_target.entity.is_some() {
+            if let Some(target) = &mating_target.entity {
+                move_towards(&mut prey_position_size, target, settings.prey_speed);
+            }
         }
 
         // Prey "eats" the environment to regain life
@@ -215,6 +221,74 @@ fn update_environment(mut query: Query<&mut Environment>, settings: Res<Settings
     }
 }
 
+fn try_mate_prey(
+    mut seekers: Query<(Entity, &Life, &PositionSize, &mut MatingTarget), With<Prey>>,
+    targets: Query<(Entity, &Life, &PositionSize), With<Prey>>,
+    settings: Res<Settings>,
+) {
+    for (seeker_entity, seeker_life, seeker_pos, mut seeker_final_target) in seekers.iter_mut() {
+        if seeker_life.value < settings.prey_reproduction_energy {
+            continue;
+        }
+
+        let mut closest_target = None;
+        let mut min_distance = f32::MAX;
+
+        for (target_entity, target_life, target_pos) in targets.iter() {
+            if target_entity == seeker_entity
+                || target_life.value < settings.prey_reproduction_energy
+            {
+                continue;
+            }
+
+            let (detected, distance) =
+                in_detection_range(&seeker_pos, target_pos, settings.prey_detection_range);
+            if detected && distance < min_distance {
+                min_distance = distance;
+                closest_target = Some(target_pos);
+            }
+        }
+
+        if let Some(target_pos) = closest_target {
+            seeker_final_target.entity = Some(target_pos.clone());
+        }
+    }
+}
+
+fn try_mate_predator(
+    mut seekers: Query<(Entity, &Life, &PositionSize, &mut MatingTarget), With<Predator>>,
+    targets: Query<(Entity, &Life, &PositionSize), With<Predator>>,
+    settings: Res<Settings>,
+) {
+    for (seeker_entity, seeker_life, seeker_pos, mut seeker_final_target) in seekers.iter_mut() {
+        if seeker_life.value < settings.predator_reproduction_energy {
+            continue;
+        }
+
+        let mut closest_target = None;
+        let mut min_distance = f32::MAX;
+
+        for (target_entity, target_life, target_pos) in targets.iter() {
+            if target_entity == seeker_entity
+                || target_life.value < settings.predator_reproduction_energy
+            {
+                continue;
+            }
+
+            let (detected, distance) =
+                in_detection_range(&seeker_pos, target_pos, settings.predator_detection_range);
+            if detected && distance < min_distance {
+                min_distance = distance;
+                closest_target = Some(target_pos);
+            }
+        }
+
+        if let Some(target_pos) = closest_target {
+            seeker_final_target.entity = Some(target_pos.clone());
+        }
+    }
+}
+
 fn drain_life(
     // This query makes it so that we fetch either a predator or a prey if the option is there
     mut query: Query<
@@ -223,10 +297,10 @@ fn drain_life(
     >,
 ) {
     for (mut mortal, mut life, predator, prey) in query.iter_mut() {
-        if predator.is_some() && predator.unwrap().hunting {
+        if predator.is_some() && predator.unwrap().status == 3 {
             life.value -= 1;
         }
-        if prey.is_some() && prey.unwrap().hunted {
+        if prey.is_some() && prey.unwrap().status == 3 {
             life.value -= 1;
         }
 
@@ -244,7 +318,119 @@ fn remove_dead(mut commands: Commands, query: Query<(Entity, &Mortal)>) {
     }
 }
 
-fn handle_collisions(
+fn handle_mating(
+    mut query: Query<
+        (
+            &PositionSize,
+            &mut MatingTarget,
+            &mut Life,
+            Option<&Predator>,
+            Option<&Prey>,
+        ),
+        Or<(With<Predator>, With<Prey>)>,
+    >,
+    settings: Res<Settings>,
+    mut commands: Commands,
+) {
+    for (position_size, mut mating_target, mut life, predator, prey) in query.iter_mut() {
+        // Check what kind of entity we're dealing with
+        let mut entity_type: u16 = 0; // 0 is prey, 1 is predator
+        let required_energy: i32; // We default to prey and overwrite if neccesary
+        let entity_status: u16;
+
+        if predator.is_some() {
+            entity_type = 1;
+            required_energy = settings.predator_reproduction_energy;
+            entity_status = predator.unwrap().status;
+        } else {
+            required_energy = settings.prey_reproduction_energy;
+            entity_status = prey.unwrap().status;
+        }
+
+        // Prey can't breed if they're being hunted
+        if entity_status == 2 && entity_type == 0 {
+            continue;
+        }
+
+        // Final check to make sure the entity has enough energy to mate and is colliding with mate
+        if life.value < required_energy {
+            continue;
+        }
+
+        // We check to see if there is even a mate
+        if let Some(target_entity) = &mating_target.entity {
+            // Ensure we are actually colliding with our target and are in a mating mood
+            if !is_colliding(&position_size, target_entity) {
+                continue;
+            }
+
+            match entity_type {
+                0 => {
+                    let position_x = (position_size.x + target_entity.x) / 2.0;
+                    let position_y = (position_size.y + target_entity.y) / 2.0;
+
+                    commands.spawn((
+                        Prey { status: 0 },
+                        Mortal { dead: false },
+                        MatingTarget { entity: None },
+                        Life {
+                            value: settings.prey_life,
+                        },
+                        PositionSize {
+                            x: position_x,
+                            y: position_y,
+                            width: settings.default_dimensions,
+                            height: settings.default_dimensions,
+                        },
+                        Sprite {
+                            color: Color::srgb(0.0, 1.0, 0.0),
+                            custom_size: Some(Vec2::new(
+                                settings.default_dimensions,
+                                settings.default_dimensions,
+                            )),
+                            ..default()
+                        },
+                        Transform::from_xyz(position_x, position_y, 0.0),
+                    ));
+                }
+                1 => {
+                    let position_x = (position_size.x + target_entity.x) / 2.0;
+                    let position_y = (position_size.y + target_entity.y) / 2.0;
+
+                    commands.spawn((
+                        Predator { status: 0 },
+                        Mortal { dead: false },
+                        MatingTarget { entity: None },
+                        Life {
+                            value: settings.predator_life,
+                        },
+                        PositionSize {
+                            x: position_x,
+                            y: position_y,
+                            width: settings.default_dimensions,
+                            height: settings.default_dimensions,
+                        },
+                        Sprite {
+                            color: Color::srgb(1.0, 0.0, 0.0),
+                            custom_size: Some(Vec2::new(
+                                settings.default_dimensions,
+                                settings.default_dimensions,
+                            )),
+                            ..default()
+                        },
+                        Transform::from_xyz(position_x, position_y, 0.0),
+                    ));
+                }
+                _ => {} // Handle the impossible edge case where it isn't 0 or 1
+            }
+
+            life.value -= required_energy; // Reduce the energy of the parent
+            mating_target.entity = None;
+        }
+    }
+}
+
+fn handle_hostile_collisions(
     mut prey_query: Query<(&PositionSize, &mut Mortal), With<Prey>>,
     mut predator_query: Query<(&PositionSize, &mut Life), With<Predator>>,
 ) {
@@ -370,11 +556,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             .gen_range((-(window_height / 2.0).abs())..(window_height / 2.0).abs());
 
         commands.spawn((
-            Predator {
-                hunting: false,
-                status: 0,
-            },
+            Predator { status: 0 },
             Mortal { dead: false },
+            MatingTarget { entity: None },
             Life {
                 value: settings.predator_life,
             },
@@ -401,12 +585,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
             .gen_range((-(window_height / 2.0).abs())..(window_height / 2.0).abs());
 
         commands.spawn((
-            Prey {
-                hunted: false,
-                try_mating: false,
-                status: 0,
-            },
+            Prey { status: 0 },
             Mortal { dead: false },
+            MatingTarget { entity: None },
             Life {
                 value: settings.prey_life,
             },
@@ -453,7 +634,8 @@ fn read_settings(mut commands: Commands) {
         predator_reproduction_energy: settings["predator_reproduction_energy"]
             .parse::<i32>()
             .unwrap(),
-        detection_range: settings["detection_range"].parse::<f32>().unwrap(),
+        prey_detection_range: settings["prey_detection_range"].parse::<f32>().unwrap(),
+        predator_detection_range: settings["predator_detection_range"].parse::<f32>().unwrap(),
         default_dimensions: settings["default_dimensions"].parse::<f32>().unwrap(),
         environment_grow_rate: settings["environment_grow_rate"].parse::<f32>().unwrap(),
         environment_max: settings["environment_max"].parse::<i32>().unwrap(),
@@ -504,6 +686,7 @@ fn main() {
     app.register_type::<Mortal>();
     app.register_type::<Prey>();
     app.register_type::<Predator>();
+    app.register_type::<MatingTarget>();
     app.register_type::<Life>();
     app.register_type::<Environment>();
 
@@ -520,10 +703,13 @@ fn main() {
             update_environment,
             wiggle_squares,
             update_transform,
+            handle_mating,
             update_preys,
             update_predators,
+            try_mate_prey,
+            try_mate_predator,
             window_collision,
-            handle_collisions,
+            handle_hostile_collisions,
             remove_dead,
             drain_life,
             update_ui_text,

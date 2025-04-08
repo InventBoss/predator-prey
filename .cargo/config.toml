@@ -1,5 +1,5 @@
 [env]
-WGPU_BACKEND= "dx12"
+# WGPU_BACKEND= "dx12"
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
