@@ -28,7 +28,7 @@ struct PopulationHistory {
 
 #[derive(Reflect, Resource)]
 #[reflect(Resource)]
-struct Settings {
+pub struct Settings {
     window_width: f32,
     window_height: f32,
     predator_population: i32,
@@ -37,6 +37,8 @@ struct Settings {
     prey_speed: f32,
     predator_life: i32,
     prey_life: i32,
+    prey_energy_loss: i32,
+    predator_energy_loss: i32,
     prey_idle_energy_gain: i32,
     predator_hunt_energy_gain: i32,
     prey_reproduction_energy: i32,
@@ -46,6 +48,7 @@ struct Settings {
     default_dimensions: f32,
     environment_grow_rate: f32,
     environment_max: i32,
+    wiggle_when_hunted: bool,
 }
 
 #[derive(Reflect, Component)]
@@ -70,6 +73,9 @@ struct Predator {
 #[reflect(Component)]
 struct MatingTarget {
     entity: Option<PositionSize>,
+    index: Option<u32>,
+    // Index is stored for when we mate with the target. Eventually, the partner with the higher index
+    // will have the child. This is to prevent making twins when both the partners run reproduction code.
 }
 
 #[derive(Reflect, Component)]
@@ -231,7 +237,8 @@ fn try_mate_prey(
             continue;
         }
 
-        let mut closest_target = None;
+        let mut closest_target_pos = None;
+        let mut closest_target_index = None;
         let mut min_distance = f32::MAX;
 
         for (target_entity, target_life, target_pos) in targets.iter() {
@@ -245,12 +252,14 @@ fn try_mate_prey(
                 in_detection_range(&seeker_pos, target_pos, settings.prey_detection_range);
             if detected && distance < min_distance {
                 min_distance = distance;
-                closest_target = Some(target_pos);
+                closest_target_pos = Some(target_pos);
+                closest_target_index = Some(target_entity.index());
             }
         }
 
-        if let Some(target_pos) = closest_target {
+        if let Some(target_pos) = closest_target_pos {
             seeker_final_target.entity = Some(target_pos.clone());
+            seeker_final_target.index = closest_target_index;
         }
     }
 }
@@ -295,13 +304,17 @@ fn drain_life(
         (&mut Mortal, &mut Life, Option<&Predator>, Option<&Prey>),
         Or<(With<Predator>, With<Prey>)>,
     >,
+    settings: Res<Settings>,
 ) {
     for (mut mortal, mut life, predator, prey) in query.iter_mut() {
-        if predator.is_some() && predator.unwrap().status == 3 {
-            life.value -= 1;
+        if predator.is_some() {
+            // Predators lose energy constantly
+            life.value -= settings.predator_energy_loss;
         }
         if prey.is_some() && prey.unwrap().status == 3 {
-            life.value -= 1;
+            // Preys only lose it if they're being hunted as it's being regenerated
+            // by eating the environment anyway
+            life.value -= settings.prey_energy_loss;
         }
 
         if life.value <= 0 {
@@ -321,6 +334,7 @@ fn remove_dead(mut commands: Commands, query: Query<(Entity, &Mortal)>) {
 fn handle_mating(
     mut query: Query<
         (
+            Entity,
             &PositionSize,
             &mut MatingTarget,
             &mut Life,
@@ -332,7 +346,7 @@ fn handle_mating(
     settings: Res<Settings>,
     mut commands: Commands,
 ) {
-    for (position_size, mut mating_target, mut life, predator, prey) in query.iter_mut() {
+    for (entity, position_size, mut mating_target, mut life, predator, prey) in query.iter_mut() {
         // Check what kind of entity we're dealing with
         let mut entity_type: u16 = 0; // 0 is prey, 1 is predator
         let required_energy: i32; // We default to prey and overwrite if neccesary
@@ -347,32 +361,40 @@ fn handle_mating(
             entity_status = prey.unwrap().status;
         }
 
-        // Prey can't breed if they're being hunted
-        if entity_status == 2 && entity_type == 0 {
-            continue;
-        }
-
-        // Final check to make sure the entity has enough energy to mate and is colliding with mate
-        if life.value < required_energy {
+        // Prey can't breed if they're being hunted and
+        // we need to check to make sure the entity (both prey or predator) has enough energy to mate
+        if entity_status == 2 && entity_type == 0 || life.value < required_energy {
             continue;
         }
 
         // We check to see if there is even a mate
-        if let Some(target_entity) = &mating_target.entity {
-            // Ensure we are actually colliding with our target and are in a mating mood
-            if !is_colliding(&position_size, target_entity) {
+        if let Some(target) = &mating_target.entity {
+            // Ensure we are actually colliding with our target
+            if !is_colliding(&position_size, target) {
                 continue;
+            }
+
+            // We give breeding priority to the mate with a higher index to prevent twins
+            // by only having one partner run the reproduction code. If this entity skips the code,
+            // their partner either had or is going to have the child entity
+            if let Some(index) = mating_target.index {
+                if entity.index() < index {
+                    continue;
+                }
             }
 
             match entity_type {
                 0 => {
-                    let position_x = (position_size.x + target_entity.x) / 2.0;
-                    let position_y = (position_size.y + target_entity.y) / 2.0;
+                    let position_x = (position_size.x + target.x) / 2.0;
+                    let position_y = (position_size.y + target.y) / 2.0;
 
                     commands.spawn((
                         Prey { status: 0 },
                         Mortal { dead: false },
-                        MatingTarget { entity: None },
+                        MatingTarget {
+                            entity: None,
+                            index: None,
+                        },
                         Life {
                             value: settings.prey_life,
                         },
@@ -394,13 +416,16 @@ fn handle_mating(
                     ));
                 }
                 1 => {
-                    let position_x = (position_size.x + target_entity.x) / 2.0;
-                    let position_y = (position_size.y + target_entity.y) / 2.0;
+                    let position_x = (position_size.x + target.x) / 2.0;
+                    let position_y = (position_size.y + target.y) / 2.0;
 
                     commands.spawn((
                         Predator { status: 0 },
                         Mortal { dead: false },
-                        MatingTarget { entity: None },
+                        MatingTarget {
+                            entity: None,
+                            index: None,
+                        },
                         Life {
                             value: settings.predator_life,
                         },
@@ -426,6 +451,7 @@ fn handle_mating(
 
             life.value -= required_energy; // Reduce the energy of the parent
             mating_target.entity = None;
+            mating_target.index = None
         }
     }
 }
@@ -558,7 +584,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
         commands.spawn((
             Predator { status: 0 },
             Mortal { dead: false },
-            MatingTarget { entity: None },
+            MatingTarget {
+                entity: None,
+                index: None,
+            },
             Life {
                 value: settings.predator_life,
             },
@@ -587,7 +616,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<S
         commands.spawn((
             Prey { status: 0 },
             Mortal { dead: false },
-            MatingTarget { entity: None },
+            MatingTarget {
+                entity: None,
+                index: None,
+            },
             Life {
                 value: settings.prey_life,
             },
@@ -626,6 +658,8 @@ fn read_settings(mut commands: Commands) {
         prey_speed: settings["prey_speed"].parse::<f32>().unwrap(),
         predator_life: settings["predator_life"].parse::<i32>().unwrap(),
         prey_life: settings["prey_life"].parse::<i32>().unwrap(),
+        prey_energy_loss: settings["prey_energy_loss"].parse::<i32>().unwrap(),
+        predator_energy_loss: settings["predator_energy_loss"].parse::<i32>().unwrap(),
         prey_idle_energy_gain: settings["prey_idle_energy_gain"].parse::<i32>().unwrap(),
         predator_hunt_energy_gain: settings["predator_hunt_energy_gain"]
             .parse::<i32>()
@@ -639,6 +673,7 @@ fn read_settings(mut commands: Commands) {
         default_dimensions: settings["default_dimensions"].parse::<f32>().unwrap(),
         environment_grow_rate: settings["environment_grow_rate"].parse::<f32>().unwrap(),
         environment_max: settings["environment_max"].parse::<i32>().unwrap(),
+        wiggle_when_hunted: settings["wiggle_when_hunted"].parse::<bool>().unwrap(),
     });
 }
 

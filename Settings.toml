@@ -10,8 +10,11 @@ prey_speed = 0.2
 predator_life = 5000
 prey_life = 5000
 
+prey_energy_loss = 1
+predator_energy_loss = 1
+
 prey_idle_energy_gain = 2
-predator_hunt_energy_gain = 1000
+predator_hunt_energy_gain = 3000
 
 prey_reproduction_energy = 6000
 predator_reproduction_energy = 6000
@@ -22,3 +25,5 @@ predator_detection_range = 50.0
 default_dimensions = 3
 environment_grow_rate = 1.1
 environment_max = 1000000
+
+wiggle_when_hunted = true
